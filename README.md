@@ -9,7 +9,7 @@ Give it any knowledge base (business info, policies, product docs, personal data
 ```mermaid
 flowchart LR
     subgraph Ingestion["Ingestion (offline)"]
-        A[Documents<br/>Local / AWS S3] --> B[Chunking]
+        A[Documents<br/> AWS S3] --> B[Chunking]
         B --> C[Embeddings]
         C --> D[(ChromaDB)]
     end
