@@ -1,76 +1,83 @@
 """
-Generic RAG API.
+FastAPI backend for embedding the chatbot on ANY website.
 
-Run with:
-
-uvicorn api:app --reload
+Run with: uvicorn api:app --host 0.0.0.0 --port 8000
+Demo page: http://localhost:8000/static/demo.html
 """
 
-from fastapi import FastAPI
+import sys
+import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-from src.rag_engine import RAGEngine
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+from config import ALLOWED_ORIGINS, BOT_NAME, RATE_LIMIT_PER_MIN, WELCOME_MESSAGE  # noqa: E402
+from rag_engine import RAGEngine  # noqa: E402
 
-
-app = FastAPI(
-    title="Generic RAG API",
-    description="API for document-based AI question answering",
-    version="1.0.0",
-)
+state = {}
 
 
-# Allow websites to call the API
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    state["engine"] = RAGEngine()  # load models once at startup
+    yield
+
+
+app = FastAPI(title=f"{BOT_NAME} API", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
+# --- Basic in-memory rate limiting (per client IP) ---
+_hits: dict[str, deque] = defaultdict(deque)
 
-# Load RAG engine once
-engine = RAGEngine()
+
+def check_rate_limit(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    window = _hits[ip]
+    while window and now - window[0] > 60:
+        window.popleft()
+    if len(window) >= RATE_LIMIT_PER_MIN:
+        raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
+    window.append(now)
 
 
 class ChatRequest(BaseModel):
-
-    question: str
-
-
-class ChatResponse(BaseModel):
-
-    answer: str
-    sources: list[str]
-
-
-@app.get("/")
-def root():
-
-    return {
-        "status": "online",
-        "service": "Generic RAG API",
-    }
+    message: str = Field(min_length=1, max_length=1000)
 
 
 @app.get("/health")
 def health():
-
-    return {
-        "status": "healthy",
-        "documents": engine.collection.count(),
-    }
+    return {"status": "ok", "chunks": state["engine"].collection.count()}
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
+@app.get("/config")
+def config():
+    """Public settings the widget uses for its title and greeting."""
+    return {"bot_name": BOT_NAME, "welcome_message": WELCOME_MESSAGE}
 
-    result = engine.ask(
-        request.question
-    )
 
-    return ChatResponse(
-        answer=result["answer"],
-        sources=result["sources"],
-    )
+@app.post("/chat")
+def chat(body: ChatRequest, request: Request):
+    check_rate_limit(request)
+    try:
+        return state["engine"].ask(body.message.strip())
+    except Exception as e:  # noqa: BLE001
+        print(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
+
+
+# Serves widget/chat-widget.js and the demo page
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "widget"), name="static")
