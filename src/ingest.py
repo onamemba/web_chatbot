@@ -1,108 +1,114 @@
 """
-Ingestion pipeline: pulls documents from S3, chunks them, embeds them
-with a local (free) embedding model, and stores the vectors in ChromaDB.
+Ingestion: load documents (local folder or S3) -> chunk -> embed locally -> ChromaDB.
 
-Run this once (or whenever your source documents change) before
-querying the chatbot.
+Run whenever your documents change:
+    python src/ingest.py                # uses DATA_SOURCE from .env
+    python src/ingest.py --source local
+    python src/ingest.py --source s3
 """
 
-import os
+import argparse
 from pathlib import Path
 
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-from s3_utils import download_docs_from_s3
+from config import (
+    CHROMA_DB_DIR,
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    COLLECTION_NAME,
+    DATA_DIR,
+    DATA_SOURCE,
+    EMBEDDING_MODEL_NAME,
+    PROJECT_ROOT,
+    S3_PREFIX,
+)
 
-CHROMA_DB_DIR = "chroma_db"
-COLLECTION_NAME = "company_policies"
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # small, fast, free, runs locally
-CHUNK_SIZE = 800  # characters per chunk
-CHUNK_OVERLAP = 150  # overlap between chunks to preserve context across boundaries
-S3_PREFIX = "hr-policy/data/"  # matches s3://rag-chatbot-data-bkt/hr-policy/data/*.md
+SUPPORTED = {".md", ".txt", ".pdf"}
 
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
-    """Simple sliding-window chunker. Good enough for short policy docs."""
+    """Sliding-window chunker with overlap to preserve context across boundaries."""
+    step = max(1, chunk_size - overlap)
     chunks = []
-    start = 0
-    text_length = len(text)
-
-    while start < text_length:
-        end = start + chunk_size
-        chunk = text[start:end]
-        chunks.append(chunk)
-        start += chunk_size - overlap
-
+    for start in range(0, len(text), step):
+        chunk = text[start : start + chunk_size].strip()
+        if chunk:
+            chunks.append(chunk)
     return chunks
 
 
+def read_file(path: Path) -> str:
+    if path.suffix.lower() == ".pdf":
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(path))
+        return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
 def load_documents(local_dir: str):
-    """Read all .md/.txt files from a local directory into memory."""
+    """Recursively read .md / .txt / .pdf files into memory."""
+    base = Path(local_dir)
     documents = []
-    for file_path in Path(local_dir).glob("*"):
-        if file_path.suffix in (".md", ".txt"):
-            text = file_path.read_text(encoding="utf-8")
-            documents.append({"filename": file_path.name, "text": text})
+    for fp in sorted(base.rglob("*")):
+        if fp.is_file() and fp.suffix.lower() in SUPPORTED:
+            text = read_file(fp).strip()
+            if text:
+                documents.append({"filename": str(fp.relative_to(base)), "text": text})
     return documents
 
 
-def build_index(use_s3: bool = True):
-    """
-    Full ingestion run:
-      1. Pull docs from S3 (or use local ./data if use_s3=False)
-      2. Chunk each doc
-      3. Embed each chunk locally (sentence-transformers, no API cost)
-      4. Store embeddings + text + metadata in ChromaDB
-    """
-    if use_s3:
+def build_index(source: str = DATA_SOURCE):
+    if source == "s3":
+        from s3_utils import download_docs_from_s3
+
         print("Downloading documents from S3...")
-        download_docs_from_s3(s3_prefix=S3_PREFIX, local_dir="data_from_s3")
-        source_dir = "data_from_s3"
+        source_dir = str(PROJECT_ROOT / "data_from_s3")
+        download_docs_from_s3(s3_prefix=S3_PREFIX, local_dir=source_dir)
     else:
-        print("Using local ./data directory (S3 skipped).")
-        source_dir = "data"
+        source_dir = str(PROJECT_ROOT / DATA_DIR)
+        print(f"Using local directory: {source_dir}")
 
     documents = load_documents(source_dir)
-    print(f"Loaded {len(documents)} documents.")
+    if not documents:
+        raise SystemExit(f"No .md/.txt/.pdf documents found in {source_dir}")
+    print(f"Loaded {len(documents)} document(s).")
 
-    print(f"Loading embedding model '{EMBEDDING_MODEL_NAME}' (runs locally, free)...")
+    print(f"Loading embedding model '{EMBEDDING_MODEL_NAME}' (runs locally)...")
     model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-    client = chromadb.PersistentClient(path=CHROMA_DB_DIR)
-    # Fresh collection each run, keeps this idempotent and simple.
+    client = chromadb.PersistentClient(path=str(CHROMA_DB_DIR))
     try:
-        client.delete_collection(COLLECTION_NAME)
+        client.delete_collection(COLLECTION_NAME)  # fresh index each run (idempotent)
     except Exception:
         pass
     collection = client.create_collection(COLLECTION_NAME)
 
-    all_chunks = []
-    all_metadatas = []
-    all_ids = []
-    chunk_counter = 0
-
+    chunks, metadatas, ids = [], [], []
     for doc in documents:
-        chunks = chunk_text(doc["text"])
-        for i, chunk in enumerate(chunks):
-            all_chunks.append(chunk)
-            all_metadatas.append({"source": doc["filename"], "chunk_index": i})
-            all_ids.append(f"chunk-{chunk_counter}")
-            chunk_counter += 1
+        for i, chunk in enumerate(chunk_text(doc["text"])):
+            chunks.append(chunk)
+            metadatas.append({"source": doc["filename"], "chunk_index": i})
+            ids.append(f"chunk-{len(ids)}")
 
-    print(f"Created {len(all_chunks)} chunks. Embedding now...")
-    embeddings = model.encode(all_chunks, show_progress_bar=True).tolist()
+    print(f"Created {len(chunks)} chunks. Embedding...")
+    embeddings = model.encode(chunks, show_progress_bar=True).tolist()
 
-    collection.add(
-        ids=all_ids,
-        embeddings=embeddings,
-        documents=all_chunks,
-        metadatas=all_metadatas,
-    )
+    batch = 500
+    for i in range(0, len(chunks), batch):
+        collection.add(
+            ids=ids[i : i + batch],
+            embeddings=embeddings[i : i + batch],
+            documents=chunks[i : i + batch],
+            metadatas=metadatas[i : i + batch],
+        )
 
-    print(f"Done. Indexed {len(all_chunks)} chunks into ChromaDB at '{CHROMA_DB_DIR}'.")
+    print(f"Done. Indexed {len(chunks)} chunks into '{COLLECTION_NAME}' at {CHROMA_DB_DIR}.")
 
 
 if __name__ == "__main__":
-    # Set use_s3=False for a quick local-only test without touching AWS.
-    build_index(use_s3=True)
+    parser = argparse.ArgumentParser(description="Index documents into ChromaDB.")
+    parser.add_argument("--source", choices=["local", "s3"], default=DATA_SOURCE)
+    build_index(parser.parse_args().source)

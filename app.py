@@ -1,6 +1,5 @@
 """
-Streamlit frontend for the company policy RAG chatbot.
-
+Streamlit frontend (great for demos and internal use).
 Run with: streamlit run app.py
 """
 
@@ -10,15 +9,13 @@ from pathlib import Path
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+from config import BOT_NAME, BOT_SUBJECT, WELCOME_MESSAGE  # noqa: E402
 from rag_engine import RAGEngine  # noqa: E402
 
-st.set_page_config(page_title="Company HR Assistant", page_icon="💬", layout="centered")
+st.set_page_config(page_title=BOT_NAME, page_icon="💬", layout="centered")
 
-st.title("💬 Company HR Assistant")
-st.caption(
-    "Ask me about PTO, leave of absence, promotions, onboarding, or remote work policy. "
-    "I only answer using the company's actual policy documents."
-)
+st.title(f"💬 {BOT_NAME}")
+st.caption(f"Ask me about {BOT_SUBJECT}. I only answer using the documents I've been given.")
 
 
 @st.cache_resource
@@ -33,56 +30,46 @@ except ValueError as e:
     st.stop()
 
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "assistant",
-            "content": "Hi! I'm your HR assistant. Ask me anything about PTO, leave, "
-            "promotions, onboarding, or remote work policy.",
-        }
-    ]
+    st.session_state.messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask a question, e.g. 'How do I request PTO?'"):
+if prompt := st.chat_input("Ask a question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Checking company policy..."):
+        with st.spinner("Searching the knowledge base..."):
             result = engine.ask(prompt)
-            answer = result["answer"]
-            sources = result["sources"]
-
+            answer, sources = result["answer"], result["sources"]
             st.markdown(answer)
             if sources:
                 st.caption(f"📄 Source: {', '.join(sources)}")
 
-    full_response = answer
-    if sources:
-        full_response += f"\n\n*Source: {', '.join(sources)}*"
+    full_response = answer + (f"\n\n*Source: {', '.join(sources)}*" if sources else "")
     st.session_state.messages.append({"role": "assistant", "content": full_response})
 
 with st.sidebar:
     st.header("About this project")
     st.markdown(
         """
-This is a Retrieval-Augmented Generation (RAG) chatbot that answers
-employee questions using real company policy documents.
+A Retrieval-Augmented Generation (RAG) chatbot that answers questions
+using **your own documents**.
 
 **How it works:**
-1. Company policy docs are stored in **AWS S3**
-2. Documents are chunked and embedded locally (free, no API cost)
-3. Embeddings are stored in **ChromaDB** (vector database)
-4. Your question is matched against the most relevant chunks
-5. **Groq** (free-tier LLM) generates an answer grounded in that context
+1. Documents come from a local folder or **AWS S3**
+2. They're chunked and embedded locally (free)
+3. Embeddings are stored in **ChromaDB**
+4. Your question is matched to the most relevant chunks
+5. **Groq** generates an answer grounded in that context
 
-**Tech stack:** AWS S3 · Python · sentence-transformers · ChromaDB · Groq · Streamlit
+**Stack:** Python · sentence-transformers · ChromaDB · Groq · Streamlit · FastAPI
         """
     )
     st.divider()
     if st.button("Clear conversation"):
-        st.session_state.messages = []
+        st.session_state.messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
         st.rerun()

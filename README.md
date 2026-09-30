@@ -1,53 +1,46 @@
-# web_chatbot_rag
+# web_chatbot_rag: Streamlit Edition
 
-**A domain-agnostic RAG chatbot that answers questions strictly from your own documents.**
+**A generic RAG chatbot with a ready-to-use Streamlit chat interface. Give it any documents and it answers questions strictly from them.**
 
-Give it any knowledge base (business info, policies, product docs, personal data) and it returns accurate, source-backed answers through an embeddable web chat. Change the documents, keep the pipeline.
+Best for demos, internal tools, and quick prototypes. Change the documents, keep the pipeline.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Ingestion["Ingestion (offline)"]
-        A[Documents<br/>Local / AWS S3] --> B[Chunking]
-        B --> C[Embeddings]
+    subgraph Ingestion["Ingestion (run once)"]
+        A[Documents<br/>local folder / AWS S3] --> B[Chunking]
+        B --> C[Local embeddings]
         C --> D[(ChromaDB)]
     end
 
-    subgraph Query["Query (online)"]
-        E[Chat UI] --> F[FastAPI]
-        F --> G[Retriever]
-        G <--> D
-        G --> H[Groq LLM]
-        H --> F
-        F --> E
+    subgraph App["Streamlit app"]
+        E[Chat UI<br/>app.py] --> F[RAG engine<br/>retrieve top-k]
+        F <--> D
+        F --> G[Groq LLM]
+        G --> E
     end
 ```
-
-## Stack
-
-LangChain · AWS S3 · sentence-transformers · ChromaDB · Groq · FastAPI · HTML/JS widget
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/<your-username>/web_chatbot_rag.git
-cd web_chatbot_rag
 pip install -r requirements.txt
-cp .env.example .env          # add GROQ_API_KEY, set DATA_SOURCE=local|s3
+cp .env.example .env          # add GROQ_API_KEY and describe your bot
+# add .md / .txt / .pdf files to data/  (or set DATA_SOURCE=s3)
 
-python -m app.ingest          # index documents from data/ or S3
-uvicorn app.main:app --reload # start the API
+python src/ingest.py          # build the index
+streamlit run app.py          # open http://localhost:8501
 ```
 
-Open `frontend/index.html` to chat. To change topics, replace the documents and re-run ingestion.
+## Configure (`.env`)
 
-## API
+| Variable | Purpose |
+|---|---|
+| `GROQ_API_KEY` | Required |
+| `BOT_NAME`, `BOT_SUBJECT`, `CONTACT` | Title, topic, and fallback contact shown in the UI and prompt |
+| `WELCOME_MESSAGE` | First message in the chat |
+| `DATA_SOURCE` | `local` or `s3` (with `S3_BUCKET_NAME`, `S3_PREFIX`) |
 
-- `POST /chat` takes `{"message": "..."}` and returns `{"answer": "...", "sources": [...]}`
-- `POST /reindex` rebuilds the index
-- `GET /health` health check
+To switch topics, replace the documents and re-run `python src/ingest.py`.
 
-## License
-
-MIT

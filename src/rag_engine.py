@@ -1,215 +1,118 @@
 """
-Generic Retrieval-Augmented Generation engine.
-
-Retrieves relevant document chunks from ChromaDB
-and generates an answer using an LLM.
+Core RAG logic: embed the question, retrieve the most relevant chunks from
+ChromaDB, then ask Groq's LLM to answer using ONLY that retrieved context.
+Works for any knowledge base; behaviour is configured via .env.
 """
 
 import os
-from pathlib import Path
 
 import chromadb
-from sentence_transformers import SentenceTransformer
 from groq import Groq
-from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
 
-load_dotenv()
+from config import (
+    BOT_NAME,
+    BOT_SUBJECT,
+    CHROMA_DB_DIR,
+    COLLECTION_NAME,
+    CONTACT,
+    EMBEDDING_MODEL_NAME,
+    GROQ_MODEL,
+    TOP_K,
+)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_fallback = f" and suggest they contact {CONTACT}" if CONTACT else ""
 
-CHROMA_DB_DIR = PROJECT_ROOT / "chroma_db"
-COLLECTION_NAME = "documents"
+SYSTEM_PROMPT = f"""You are {BOT_NAME}, a helpful assistant that answers questions about {BOT_SUBJECT}.
 
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+Answer the user's question using ONLY the context provided below.
 
-GROQ_MODEL = "openai/gpt-oss-20b"
+If the answer isn't in the context, say clearly that you don't have
+that information{_fallback}. Never invent facts.
 
-TOP_K = 4
+Keep answers concise and friendly.
 
-
-DEFAULT_SYSTEM_PROMPT = """
-You are a helpful AI assistant.
-
-Answer the user's question using ONLY the information
-contained in the provided context.
-
-If the answer cannot be found in the context, clearly
-say that the information is not available in the
-provided documents.
-
-Do not invent facts.
-
-Keep answers clear, concise, and helpful.
-
-When possible, mention the source document used.
+Mention which source document the answer comes from when possible.
 """
 
 
 class RAGEngine:
+    def __init__(self):
+        self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-    def __init__(
-        self,
-        collection_name=COLLECTION_NAME,
-        system_prompt=DEFAULT_SYSTEM_PROMPT,
-    ):
+        self.chroma_client = chromadb.PersistentClient(path=str(CHROMA_DB_DIR))
+        self.collection = self.chroma_client.get_or_create_collection(name=COLLECTION_NAME)
 
-        self.system_prompt = system_prompt
+        print(f"ChromaDB path: {CHROMA_DB_DIR}")
+        print(f"Collection: {COLLECTION_NAME} ({self.collection.count()} chunks)")
 
-        # Embedding model
-        self.embedding_model = SentenceTransformer(
-            EMBEDDING_MODEL_NAME
-        )
-
-        # ChromaDB
-        self.chroma_client = chromadb.PersistentClient(
-            path=str(CHROMA_DB_DIR)
-        )
-
-        self.collection = (
-            self.chroma_client.get_or_create_collection(
-                name=collection_name
-            )
-        )
-
-        # Groq
-        groq_api_key = os.getenv("GROQ_API_KEY")
-
-        if not groq_api_key:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
             raise ValueError(
-                "GROQ_API_KEY is not configured."
+                "GROQ_API_KEY not set. Get a free key at "
+                "https://console.groq.com/keys and add it to your .env file."
             )
+        self.groq_client = Groq(api_key=api_key)
 
-        self.groq_client = Groq(
-            api_key=groq_api_key
-        )
-
-    def retrieve(
-        self,
-        question: str,
-        top_k: int = TOP_K,
-    ):
-
-        document_count = self.collection.count()
-
-        if document_count == 0:
+    def retrieve(self, question: str, top_k: int = TOP_K):
+        """Embed the question and return [(chunk, metadata), ...]."""
+        total = self.collection.count()
+        if total == 0:
             return []
 
-        query_embedding = (
-            self.embedding_model
-            .encode([question])
-            .tolist()
-        )
-
-        n_results = min(
-            top_k,
-            document_count
-        )
-
+        query_embedding = self.embedding_model.encode([question]).tolist()
         results = self.collection.query(
             query_embeddings=query_embedding,
-            n_results=n_results,
+            n_results=min(top_k, total),
         )
+        return list(zip(results["documents"][0], results["metadatas"][0]))
 
-        documents = results["documents"][0]
-        metadatas = results["metadatas"][0]
-
-        return list(
-            zip(documents, metadatas)
-        )
-
-    def generate_answer(
-        self,
-        question,
-        retrieved_chunks,
-    ):
-
+    def generate_answer(self, question: str, retrieved_chunks):
+        """Generate an answer grounded only in the retrieved context."""
         if not retrieved_chunks:
-            return {
-                "answer": (
-                    "I couldn't find information "
-                    "about that in the available documents."
-                ),
-                "sources": [],
-            }
+            contact = f" Please contact {CONTACT}." if CONTACT else ""
+            return f"My knowledge base is empty, so I can't answer that yet.{contact}"
 
-        context_blocks = []
-
-        for chunk, metadata in retrieved_chunks:
-
-            source = metadata.get(
-                "source",
-                "unknown"
-            )
-
-            context_blocks.append(
-                f"[Source: {source}]\n{chunk}"
-            )
-
-        context = "\n\n---\n\n".join(
-            context_blocks
+        context_text = "\n\n---\n\n".join(
+            f"[Source: {meta.get('source', 'unknown')}]\n{chunk}"
+            for chunk, meta in retrieved_chunks
         )
 
-        prompt = f"""
-Context:
+        user_prompt = f"""Context from the knowledge base:
 
-{context}
+{context_text}
 
 ---
 
-User question:
+Question: {question}
 
-{question}
-
-Answer using only the context above.
+Answer the question using only the context above.
 """
 
-        response = (
-            self.groq_client
-            .chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": self.system_prompt,
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    },
-                ],
-                temperature=0.2,
-                max_tokens=500,
-            )
+        response = self.groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            max_tokens=500,
         )
+        return response.choices[0].message.content
 
-        answer = (
-            response
-            .choices[0]
-            .message
-            .content
-        )
-
-        sources = sorted(
-            set(
-                metadata.get(
-                    "source",
-                    "unknown"
-                )
-                for _, metadata
-                in retrieved_chunks
-            )
-        )
-
-        return {
-            "answer": answer,
-            "sources": sources,
-        }
-
-    def ask(self, question):
-
+    def ask(self, question: str):
+        """Full RAG pipeline -> {"answer": str, "sources": [str]}."""
         retrieved = self.retrieve(question)
+        answer = self.generate_answer(question, retrieved)
+        sources = sorted({meta.get("source", "unknown") for _, meta in retrieved})
+        return {"answer": answer, "sources": sources}
 
-        return self.generate_answer(
-            question,
-            retrieved
-        )
+
+if __name__ == "__main__":
+    engine = RAGEngine()
+    while True:
+        q = input("\nAsk (blank to quit): ").strip()
+        if not q:
+            break
+        result = engine.ask(q)
+        print(f"A: {result['answer']}\nSources: {result['sources']}")
