@@ -8,9 +8,9 @@ Give it any documents and it answers visitor questions strictly from them. Chang
 
 ```mermaid
 flowchart LR
-    subgraph Ingestion["Ingestion (run once)"]
-        A[Documents<br/>local folder / AWS S3] --> B[Chunking]
-        B --> C[Local embeddings]
+    subgraph Ingestion["Ingestion (offline)"]
+        A[Documents<br/>Local / AWS S3] --> B[Chunking]
+        B --> C[Embeddings]
         C --> D[(ChromaDB)]
     end
 
