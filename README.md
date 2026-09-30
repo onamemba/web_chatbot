@@ -1,4 +1,4 @@
-# web_chatbot_rag: FastAPI Edition
+# web_chatbot_rag
 
 **A generic RAG chatbot served as an API with a drop-in widget, so it can be added to any website with one line of code.**
 
