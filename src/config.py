@@ -25,12 +25,12 @@ WELCOME_MESSAGE = _get(
     "WELCOME_MESSAGE", "Hi! Ask me anything."
 )
 
-# Data
-DATA_SOURCE = _get("DATA_SOURCE", "local")  # local | s3
+# Data: documents are uploaded through the website, not synced from anywhere else
 DATA_DIR = _get("DATA_DIR", "data")
-S3_BUCKET_NAME = _get("S3_BUCKET_NAME", "")
-S3_PREFIX = _get("S3_PREFIX", "")
-AWS_REGION = _get("AWS_REGION", "us-east-1")
+UPLOAD_DIR = Path(_get("UPLOAD_DIR", "data/uploads"))
+if not UPLOAD_DIR.is_absolute():
+    UPLOAD_DIR = PROJECT_ROOT / UPLOAD_DIR
+MAX_UPLOAD_MB = int(_get("MAX_UPLOAD_MB", "10"))
 
 # Models / retrieval
 GROQ_MODEL = _get("GROQ_MODEL", "openai/gpt-oss-20b")

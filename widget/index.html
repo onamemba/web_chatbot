@@ -148,6 +148,17 @@ td:first-child{font:600 .88rem ui-monospace,Consolas,monospace;white-space:nowra
   </ul>
 </div></section>
 
+<section id="upload"><div class="wrap">
+  <h2>Teach it your documents</h2>
+  <p class="lead">Upload a file right here — it's chunked, embedded and indexed immediately. Ask about it in the chat bubble straight away.</p>
+  <form id="upform" class="card" style="max-width:560px">
+    <p style="margin:0 0 12px"><input id="upfile" type="file" accept=".md,.txt,.pdf" /></p>
+    <p style="margin:0"><button class="btn" type="submit" id="upbtn">Upload &amp; index</button></p>
+    <p id="upmsg" class="lead" style="margin:12px 0 0" aria-live="polite"></p>
+  </form>
+  <div class="note">Accepted: <b>.md</b>, <b>.txt</b>, <b>.pdf</b> — max 10 MB each. Re-uploading the same filename replaces its old chunks.</div>
+</div></section>
+
 <section id="fastapi"><div class="wrap">
   <h2>Where FastAPI fits</h2>
   <p class="lead">FastAPI is a Python framework for building web APIs. Here it turns the chatbot's brain into a service that any website can call.</p>
@@ -164,6 +175,9 @@ td:first-child{font:600 .88rem ui-monospace,Consolas,monospace;white-space:nowra
     <tr><td>GET /config</td><td>Gives the widget the bot name and greeting.</td></tr>
     <tr><td>GET /health</td><td>Confirms the server is running and how many chunks are indexed.</td></tr>
     <tr><td>GET /static/chat-widget.js</td><td>Serves the chat bubble your site loads.</td></tr>
+    <tr><td>POST /upload</td><td>Upload a <code>.md</code>/<code>.txt</code>/<code>.pdf</code> file — it's indexed immediately and returns <code>{"filename": "...", "chunks": N}</code>.</td></tr>
+    <tr><td>GET /documents</td><td>Lists indexed documents with their chunk counts.</td></tr>
+    <tr><td>DELETE /documents/{filename}</td><td>Removes a document from the index and deletes its file.</td></tr>
     <tr><td>GET /docs</td><td>Interactive test page, generated automatically by FastAPI.</td></tr>
   </table></div>
   <ul class="ticks">
@@ -178,7 +192,7 @@ td:first-child{font:600 .88rem ui-monospace,Consolas,monospace;white-space:nowra
   <h2>Add it to any website</h2>
   <p class="lead">The chatbot runs as a small API. Your site only needs one line of HTML.</p>
   <ol class="steps">
-    <li><div><h3>Add your documents and index them</h3><p>Put files in <code>data/</code> (or your S3 bucket), then run:</p><div class="code">python src/ingest.py</div></div></li>
+    <li><div><h3>Add your documents</h3><p>Upload files in the Streamlit app, use the form on the demo page, or POST them to <code>/upload</code>. For bulk indexing from a folder, run:</p><div class="code">python src/ingest.py</div></div></li>
     <li><div><h3>Deploy the API</h3><p>Run it locally with <code>uvicorn api:app --port 8000</code>, or deploy the included Dockerfile to Render, Railway or similar. You'll get a public HTTPS address.</p></div></li>
     <li><div><h3>Paste one line before &lt;/body&gt;</h3><p>Works on plain HTML, React, Next.js, WordPress, Webflow, Bolt and more.</p>
       <div class="code" id="snippet">&lt;script src="https://YOUR-API-URL/static/chat-widget.js" defer&gt;&lt;/script&gt;<button id="copy" type="button">Copy</button></div></div></li>
@@ -209,6 +223,20 @@ td:first-child{font:600 .88rem ui-monospace,Consolas,monospace;white-space:nowra
     var s='<script src="https://YOUR-API-URL/static/chat-widget.js" defer><\/script>',b=this;
     (navigator.clipboard?navigator.clipboard.writeText(s):Promise.reject()).then(function(){b.textContent="Copied"},function(){b.textContent="Select and copy"});
     setTimeout(function(){b.textContent="Copy"},1800);
+  });
+    document.getElementById("upform").addEventListener("submit", function(e){
+    e.preventDefault();
+    var f = document.getElementById("upfile").files[0], msg = document.getElementById("upmsg"), btn = document.getElementById("upbtn");
+    if(!f){ msg.textContent = "Choose a file first."; return; }
+    var fd = new FormData(); fd.append("file", f);
+    btn.disabled = true; msg.textContent = "Uploading and indexing…";
+    fetch("/upload", { method: "POST", body: fd }).then(function(r){
+      return r.json().then(function(d){ return { ok: r.ok, status: r.status, body: d }; });
+    }).then(function(res){
+      btn.disabled = false;
+      if(res.ok){ msg.textContent = "Indexed " + res.body.filename + " (" + res.body.chunks + " chunks). Try asking about it below."; }
+      else { msg.textContent = "Upload failed (" + res.status + "): " + (res.body.detail || "unknown error"); }
+    }).catch(function(){ btn.disabled = false; msg.textContent = "Couldn't reach the server. Is the API running?"; });
   });
 })();
 </script>
